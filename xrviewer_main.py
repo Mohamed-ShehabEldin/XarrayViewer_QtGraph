@@ -12,14 +12,11 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDockWidget,
     QFileDialog,
     QFormLayout,
-    QHBoxLayout,
     QLabel,
     QMainWindow,
     QSlider,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -36,21 +33,6 @@ pg.setConfigOptions(antialias=True, imageAxisOrder="row-major", background="w", 
 
 
 class XarrayViewer(QMainWindow):
-    PRESET_MAPS = [
-        "viridis",
-        "magma",
-        "inferno",
-        "plasma",
-        "turbo",
-        "grey",
-        "thermal",
-        "flame",
-        "yellowy",
-        "bipolar",
-        "spectrum",
-        "cyclic",
-    ]
-
     def __init__(self, parent=None, xr_data: xr.DataArray = None):
         super().__init__(parent)
         if __package__:
@@ -99,8 +81,6 @@ class XarrayViewer(QMainWindow):
         self.zp_plot, self.zp_plot_item = self._build_curve_panel("z_point_plot_container")
         self.zt_plot, self.zt_plot_item = self._build_curve_panel("z_t_plot_container")
         self.xp_plot, self.xp_plot_item = self._build_curve_panel("xy_profile_container")
-        self._lut_level_sync = {"xy": False, "zd": False}
-        self._build_color_controls_dock()
 
         self._xy_fixed_clim = None
         self._zd_fixed_clim = None
@@ -187,158 +167,6 @@ class XarrayViewer(QMainWindow):
         plot_item.showGrid(x=True, y=True, alpha=0.15)
         layout.addWidget(plot)
         return plot, plot_item
-
-    def _build_color_controls_dock(self):
-        dock = QDockWidget("Color Controls", self)
-        dock.setObjectName("color_controls_dock")
-        dock.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
-
-        outer = QWidget()
-        outer_layout = QVBoxLayout(outer)
-        outer_layout.setContentsMargins(6, 6, 6, 6)
-        outer_layout.setSpacing(8)
-
-        self.xy_cmap_combo, self.xy_lut_widget = self._add_color_section(
-            outer_layout, "XY Map Colors", "viridis", "xy"
-        )
-        self.zd_cmap_combo, self.zd_lut_widget = self._add_color_section(
-            outer_layout, "Z vs Distance Colors", "magma", "zd"
-        )
-        outer_layout.addStretch(1)
-
-        dock.setWidget(outer)
-        self.addDockWidget(Qt.RightDockWidgetArea, dock)
-        self.color_controls_dock = dock
-
-    def _add_color_section(self, parent_layout, title, default_preset, key):
-        section = QWidget()
-        section_layout = QVBoxLayout(section)
-        section_layout.setContentsMargins(0, 0, 0, 0)
-        section_layout.setSpacing(4)
-
-        header = QLabel(title)
-        header.setStyleSheet("font-weight: 600;")
-        section_layout.addWidget(header)
-
-        row = QWidget()
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(6)
-
-        combo = QComboBox()
-        combo.addItems(self.PRESET_MAPS)
-        combo.setCurrentText(default_preset)
-        row_layout.addWidget(QLabel("Preset"))
-        row_layout.addWidget(combo, 1)
-
-        toggle = QToolButton()
-        toggle.setText("Advanced")
-        toggle.setCheckable(True)
-        toggle.setChecked(False)
-        toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        toggle.setArrowType(Qt.RightArrow)
-        row_layout.addWidget(toggle)
-        section_layout.addWidget(row)
-
-        lut_widget = pg.HistogramLUTWidget(background="w")
-        lut_widget.setMinimumHeight(220)
-        lut_widget.setImageItem(self.xy_image if key == "xy" else self.zd_image)
-        lut_widget.item.gradient.loadPreset(default_preset)
-        lut_widget.setVisible(False)
-        section_layout.addWidget(lut_widget)
-        parent_layout.addWidget(section)
-
-        toggle.toggled.connect(lambda checked, w=lut_widget, b=toggle: self._toggle_advanced_editor(w, b, checked))
-        combo.currentTextChanged.connect(lambda name, which=key: self._apply_preset(which, name))
-        lut_widget.item.sigLookupTableChanged.connect(lambda _item, which=key: self._on_lut_changed(which))
-        lut_widget.item.sigLevelsChanged.connect(lambda _item, which=key: self._on_hist_levels_changed(which, finished=False))
-        lut_widget.item.sigLevelChangeFinished.connect(lambda _item, which=key: self._on_hist_levels_changed(which, finished=True))
-        self._sync_colorbar_from_hist(key)
-        return combo, lut_widget
-
-    @staticmethod
-    def _toggle_advanced_editor(widget, button, checked):
-        widget.setVisible(bool(checked))
-        button.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
-
-    def _get_hist_widget(self, key):
-        return self.xy_lut_widget if key == "xy" else self.zd_lut_widget
-
-    def _get_colorbar(self, key):
-        return self.xy_cbar if key == "xy" else self.zd_cbar
-
-    def _get_image_item(self, key):
-        return self.xy_image if key == "xy" else self.zd_image
-
-    def _set_stored_clim(self, key, clim):
-        if key == "xy":
-            self._xy_fixed_clim = clim
-        else:
-            self._zd_fixed_clim = clim
-
-    def _sym_checkbox_checked(self, key):
-        chk = self.plt1_sym_clim_chkbx if key == "xy" else self.plt2_sym_clim_chkbx
-        return bool(chk.isChecked()) if chk is not None else False
-
-    def _fix_checkbox_checked(self, key):
-        chk = self.plt1_fix_clim_chkbx if key == "xy" else self.plt2_fix_clim_chkbx
-        return bool(chk.isChecked()) if chk is not None else False
-
-    def _apply_preset(self, key, name):
-        hist = self._get_hist_widget(key)
-        try:
-            hist.item.gradient.loadPreset(name)
-        except Exception:
-            return
-        self._sync_colorbar_from_hist(key)
-
-    def _sync_colorbar_from_hist(self, key):
-        hist = self._get_hist_widget(key)
-        cbar = self._get_colorbar(key)
-        if hist is None or cbar is None:
-            return
-        try:
-            cmap = hist.item.gradient.colorMap()
-            cbar.setColorMap(cmap)
-        except Exception:
-            pass
-        try:
-            levels = hist.item.getLevels()
-            if levels is not None:
-                self._apply_levels(self._get_image_item(key), cbar, tuple(levels))
-        except Exception:
-            pass
-
-    def _set_hist_levels(self, key, clim):
-        hist = self._get_hist_widget(key)
-        if hist is None or clim is None:
-            return
-        vmin, vmax = clim
-        self._lut_level_sync[key] = True
-        try:
-            hist.item.setLevels(vmin, vmax)
-        finally:
-            self._lut_level_sync[key] = False
-        self._sync_colorbar_from_hist(key)
-
-    def _on_lut_changed(self, key):
-        self._sync_colorbar_from_hist(key)
-
-    def _on_hist_levels_changed(self, key, finished=False):
-        if self._lut_level_sync.get(key):
-            return
-        hist = self._get_hist_widget(key)
-        levels = hist.item.getLevels()
-        if levels is None:
-            return
-        clim = tuple(float(v) for v in levels)
-        if self._sym_checkbox_checked(key):
-            vmax = max(abs(clim[0]), abs(clim[1]))
-            clim = (-float(vmax), float(vmax))
-            self._set_hist_levels(key, clim)
-        self._sync_colorbar_from_hist(key)
-        if self._fix_checkbox_checked(key):
-            self._set_stored_clim(key, clim)
 
     def _on_axes_changed(self):
         self._build_dim_controls()
@@ -871,7 +699,6 @@ class XarrayViewer(QMainWindow):
         )
         self._apply_levels(self.xy_image, self.xy_cbar, xy_clim)
         self._xy_fixed_clim = xy_clim if self.plt1_fix_clim_chkbx is not None and self.plt1_fix_clim_chkbx.isChecked() else None
-        self._set_hist_levels("xy", xy_clim)
 
         xmin, xmax, ymin, ymax = self._xy_bounds
         self.xy_plot_item.setLabel("bottom", x_dim)
@@ -960,7 +787,6 @@ class XarrayViewer(QMainWindow):
         )
         self._apply_levels(self.zd_image, self.zd_cbar, zd_clim)
         self._zd_fixed_clim = zd_clim if self.plt2_fix_clim_chkbx is not None and self.plt2_fix_clim_chkbx.isChecked() else None
-        self._set_hist_levels("zd", zd_clim)
 
         xmin, xmax, ymin, ymax = self._zd_bounds
         self.zd_plot_item.setLabel("bottom", "distance")

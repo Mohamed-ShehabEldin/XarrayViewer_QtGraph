@@ -615,11 +615,63 @@ class XarrayViewer(QMainWindow):
             return np.arange(int(self.xr_data.sizes[dim]), dtype=float)
 
     @staticmethod
+    def _orient_for_display(plane2d, col_coords, row_coords):
+        """Reorder a (row, col) plane so the displayed image is data-accurate.
+
+        pyqtgraph ImageItem in row-major mode draws row index 0 at the
+        *bottom* edge of its rect and column index 0 on the *left* edge,
+        with index positions increasing linearly toward the max coordinate.
+        That is the correct orientation only when the coordinate arrays are
+        ascending.  To always show array cell (r, c) at the physical
+        coordinate (col_coords[c], row_coords[r]) - the same convention the
+        matplotlib/xarray viewer uses (pixels centered on coordinates) - we
+        reorder rows and columns into ascending coordinate order, exactly
+        mirroring the sorting applied to the interpolator grids in
+        ``_ensure_interpolators``.
+
+        Coordinates already in ascending order are left untouched, so for the
+        common ascending case this returns the plane unchanged (no flipud).
+        """
+        arr = np.asarray(plane2d)
+        xc = np.asarray(col_coords, dtype=float)
+        yc = np.asarray(row_coords, dtype=float)
+        nx, ny = arr.shape[1], arr.shape[0]
+        if nx != xc.size or ny != yc.size:
+            raise ValueError("plane shape does not match coordinate lengths")
+        if not np.all(np.diff(xc) > 0):
+            arr = arr[:, np.argsort(xc, kind="stable")]
+        if not np.all(np.diff(yc) > 0):
+            arr = arr[np.argsort(yc, kind="stable"), :]
+        return arr
+
+    @staticmethod
     def _bounds_from_axis(x_vals, y_vals):
         xmin = float(np.min(x_vals))
         xmax = float(np.max(x_vals))
         ymin = float(np.min(y_vals))
         ymax = float(np.max(y_vals))
+        return xmin, xmax, ymin, ymax
+
+    @staticmethod
+    def _pixel_edge_bounds(coords):
+        """Return image edges with coordinate values at the pixel centers."""
+        vals = np.sort(np.asarray(coords, dtype=float))
+        if vals.size == 0:
+            raise ValueError("image coordinate axis is empty")
+        if vals.size == 1:
+            return float(vals[0] - 0.5), float(vals[0] + 0.5)
+
+        # ImageItem uses one linear transform for the whole image.  The scan
+        # axes used here are uniform; use the endpoint cell widths so that the
+        # first and last pixel centers land exactly on their coordinates.
+        lo = float(vals[0] - 0.5 * (vals[1] - vals[0]))
+        hi = float(vals[-1] + 0.5 * (vals[-1] - vals[-2]))
+        return lo, hi
+
+    @classmethod
+    def _image_bounds_from_axis(cls, x_vals, y_vals):
+        xmin, xmax = cls._pixel_edge_bounds(x_vals)
+        ymin, ymax = cls._pixel_edge_bounds(y_vals)
         return xmin, xmax, ymin, ymax
 
     @staticmethod
@@ -688,8 +740,12 @@ class XarrayViewer(QMainWindow):
         self._xy_bounds = self._bounds_from_axis(x_vals, y_vals)
 
         values = np.asarray(da2d.values, dtype=float)
-        self.xy_image.setImage(np.flipud(values), autoLevels=False)
-        self.xy_image.setRect(self._image_rect(self._xy_bounds))
+        # Orient rows/cols to the actual coordinate values so what the user
+        # sees matches where the data really is (no blind flipud).
+        display = self._orient_for_display(values, x_vals, y_vals)
+        self.xy_image.setImage(display, autoLevels=False)
+        xy_image_bounds = self._image_bounds_from_axis(x_vals, y_vals)
+        self.xy_image.setRect(self._image_rect(xy_image_bounds))
 
         xy_clim = self._resolve_clim(
             values,
@@ -700,13 +756,13 @@ class XarrayViewer(QMainWindow):
         self._apply_levels(self.xy_image, self.xy_cbar, xy_clim)
         self._xy_fixed_clim = xy_clim if self.plt1_fix_clim_chkbx is not None and self.plt1_fix_clim_chkbx.isChecked() else None
 
-        xmin, xmax, ymin, ymax = self._xy_bounds
+        xmin, xmax, ymin, ymax = xy_image_bounds
         self.xy_plot_item.setLabel("bottom", x_dim)
         self.xy_plot_item.setLabel("left", y_dim)
         self.xy_plot_item.setTitle("XY map")
+        self.xy_plot_item.getViewBox().setLimits(xMin=xmin, xMax=xmax, yMin=ymin, yMax=ymax)
         self.xy_plot_item.setXRange(xmin, xmax, padding=0)
         self.xy_plot_item.setYRange(ymin, ymax, padding=0)
-        self.xy_plot_item.getViewBox().setLimits(xMin=xmin, xMax=xmax, yMin=ymin, yMax=ymax)
 
         if saved_line is None:
             x0, y0, x1, y1 = self._new_default_line(self._xy_bounds)
@@ -776,8 +832,12 @@ class XarrayViewer(QMainWindow):
         self._zd_bounds = self._bounds_from_axis(dist_vals, z_vals)
 
         values = np.asarray(da_zd.values, dtype=float)
-        self.zd_image.setImage(np.flipud(values), autoLevels=False)
-        self.zd_image.setRect(self._image_rect(self._zd_bounds))
+        # Row axis is the z dimension: keep z[i] at its true vertical position
+        # (mirrors the xy map fix; "distance" columns are always ascending).
+        display = self._orient_for_display(values, dist_vals, z_vals)
+        self.zd_image.setImage(display, autoLevels=False)
+        zd_image_bounds = self._image_bounds_from_axis(dist_vals, z_vals)
+        self.zd_image.setRect(self._image_rect(zd_image_bounds))
 
         zd_clim = self._resolve_clim(
             values,
@@ -788,13 +848,13 @@ class XarrayViewer(QMainWindow):
         self._apply_levels(self.zd_image, self.zd_cbar, zd_clim)
         self._zd_fixed_clim = zd_clim if self.plt2_fix_clim_chkbx is not None and self.plt2_fix_clim_chkbx.isChecked() else None
 
-        xmin, xmax, ymin, ymax = self._zd_bounds
+        xmin, xmax, ymin, ymax = zd_image_bounds
         self.zd_plot_item.setLabel("bottom", "distance")
         self.zd_plot_item.setLabel("left", z_dim)
         self.zd_plot_item.setTitle("Z vs distance")
+        self.zd_plot_item.getViewBox().setLimits(xMin=xmin, xMax=xmax, yMin=ymin, yMax=ymax)
         self.zd_plot_item.setXRange(xmin, xmax, padding=0)
         self.zd_plot_item.setYRange(ymin, ymax, padding=0)
-        self.zd_plot_item.getViewBox().setLimits(xMin=xmin, xMax=xmax, yMin=ymin, yMax=ymax)
 
         if self.draggable is not None:
             x0, y0, x1, y1 = self.draggable.get_points()
@@ -805,16 +865,23 @@ class XarrayViewer(QMainWindow):
             self._vline_x = float(self.draggable.get_t()) * self._line_length
         elif self._vline_x is None:
             self._vline_x = 0.5 * (xmin + xmax)
-        self._vline_x = float(min(max(self._vline_x, xmin), xmax))
+        dist_min, dist_max, _, _ = self._zd_bounds
+        self._vline_x = float(min(max(self._vline_x, dist_min), dist_max))
 
         if self.vline is None:
-            self.vline = pg.InfiniteLine(pos=self._vline_x, angle=90, pen=pg.mkPen("w", width=2), movable=True, bounds=[xmin, xmax])
+            self.vline = pg.InfiniteLine(
+                pos=self._vline_x,
+                angle=90,
+                pen=pg.mkPen("w", width=2),
+                movable=True,
+                bounds=[dist_min, dist_max],
+            )
             self.vline.setZValue(20)
             self.zd_plot_item.addItem(self.vline)
             self.vline.sigPositionChanged.connect(self._on_vline_move)
             self.vline.sigPositionChangeFinished.connect(self._on_vline_release)
         else:
-            self.vline.setBounds([xmin, xmax])
+            self.vline.setBounds([dist_min, dist_max])
             self._sync_vline_item()
 
     def _on_vline_move(self, line):

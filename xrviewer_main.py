@@ -90,6 +90,9 @@ class XarrayViewer(QMainWindow):
         self._interp_cache = None
         self._vline_x = None
         self._vline_updating = False
+        self._axis_change_in_progress = False
+        self._last_valid_axes = (x_default, y_default, z_default)
+        self._overlay_axes = None
 
         self.draggable = None
         self.free_point = None
@@ -120,9 +123,9 @@ class XarrayViewer(QMainWindow):
         self._xp_timer.setInterval(40)
         self._xp_timer.timeout.connect(self._update_xy_profile)
 
-        self.x_combo.currentTextChanged.connect(self._on_axes_changed)
-        self.y_combo.currentTextChanged.connect(self._on_axes_changed)
-        self.z_combo.currentTextChanged.connect(self._on_z_changed)
+        self.x_combo.currentTextChanged.connect(lambda _text: self._on_axis_selection_changed("x"))
+        self.y_combo.currentTextChanged.connect(lambda _text: self._on_axis_selection_changed("y"))
+        self.z_combo.currentTextChanged.connect(lambda _text: self._on_axis_selection_changed("z"))
         if self.export1_btn is not None:
             self.export1_btn.clicked.connect(self._export_current_snapshot)
         if self.plt1_sym_clim_chkbx is not None:
@@ -168,12 +171,42 @@ class XarrayViewer(QMainWindow):
         layout.addWidget(plot)
         return plot, plot_item
 
-    def _on_axes_changed(self):
-        self._build_dim_controls()
-        self._interp_cache = None
-        self.update_plots()
+    def _on_axis_selection_changed(self, changed_axis):
+        if self._axis_change_in_progress:
+            return
 
-    def _on_z_changed(self):
+        combos = {"x": self.x_combo, "y": self.y_combo, "z": self.z_combo}
+        previous = dict(zip(("x", "y", "z"), self._last_valid_axes))
+        current = {name: combo.currentText() for name, combo in combos.items()}
+
+        # Selecting a dimension already used by another axis swaps the two
+        # assignments. This keeps every intermediate UI state valid and makes
+        # changing X/Y/Z possible without a temporary duplicate selection.
+        duplicate_axis = next(
+            (name for name in ("x", "y", "z") if name != changed_axis and current[name] == current[changed_axis]),
+            None,
+        )
+        if duplicate_axis is not None:
+            self._axis_change_in_progress = True
+            try:
+                other_combo = combos[duplicate_axis]
+                signals_were_blocked = other_combo.blockSignals(True)
+                try:
+                    other_combo.setCurrentText(previous[changed_axis])
+                finally:
+                    other_combo.blockSignals(signals_were_blocked)
+            finally:
+                self._axis_change_in_progress = False
+            current[duplicate_axis] = previous[changed_axis]
+            self.statusBar().showMessage(
+                f"Swapped {changed_axis.upper()} and {duplicate_axis.upper()} to keep X, Y, and Z distinct",
+                5000,
+            )
+
+        old_x, old_y, _old_z = self._last_valid_axes
+        self._last_valid_axes = (current["x"], current["y"], current["z"])
+        if (current["x"], current["y"]) != (old_x, old_y):
+            self._build_dim_controls()
         self._interp_cache = None
         self.update_plots()
 
@@ -194,6 +227,10 @@ class XarrayViewer(QMainWindow):
             return False
 
     def _build_dim_controls(self):
+        previous_indices = {
+            dim: self._index_for_dim(dim)
+            for dim in self.dim_controls
+        }
         old = self.sliders_area.widget()
         if old is not None:
             old.setParent(None)
@@ -234,8 +271,9 @@ class XarrayViewer(QMainWindow):
                     slider = QSlider(Qt.Horizontal)
                     slider.setMinimum(0)
                     slider.setMaximum(n - 1)
-                    slider.setValue(0)
-                    value_label = QLabel(self._format_dim_value(dim, 0))
+                    initial_index = max(0, min(int(previous_indices.get(dim, 0)), n - 1))
+                    slider.setValue(initial_index)
+                    value_label = QLabel(self._format_dim_value(dim, initial_index))
 
                     def _on_slide(v, d=dim, lbl=value_label):
                         lbl.setText(self._format_dim_value(d, v))
@@ -258,6 +296,8 @@ class XarrayViewer(QMainWindow):
                     except Exception:
                         items = [str(i) for i in range(n)]
                     combo.addItems(items)
+                    initial_index = max(0, min(int(previous_indices.get(dim, 0)), n - 1))
+                    combo.setCurrentIndex(initial_index)
 
                     def _on_combo(_v, d=dim):
                         self._interp_cache = None
@@ -724,9 +764,10 @@ class XarrayViewer(QMainWindow):
         x_dim = self.x_combo.currentText()
         y_dim = self.y_combo.currentText()
 
-        saved_line = self.draggable.get_points() if self.draggable is not None else None
+        same_coordinate_system = self._overlay_axes == (x_dim, y_dim)
+        saved_line = self.draggable.get_points() if self.draggable is not None and same_coordinate_system else None
         saved_t = self.draggable.get_t() if self.draggable is not None else 0.5
-        saved_pt = self.free_point.get_xy() if self.free_point is not None else None
+        saved_pt = self.free_point.get_xy() if self.free_point is not None and same_coordinate_system else None
 
         if self.draggable is not None:
             self.draggable.disconnect()
@@ -814,6 +855,7 @@ class XarrayViewer(QMainWindow):
         )
         self.free_point.set_bounds(self._xy_bounds)
         self.free_point.draw()
+        self._overlay_axes = (x_dim, y_dim)
 
     def _sync_vline_item(self):
         if self.vline is None or self._vline_x is None:

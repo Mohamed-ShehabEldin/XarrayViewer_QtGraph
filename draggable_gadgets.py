@@ -31,6 +31,8 @@ class DraggablePoint:
 
     def set_bounds(self, bounds):
         self._bounds = bounds
+        x, y = self.get_xy()
+        self._set_pos(x, y)
 
     def get_xy(self):
         pos = self.item.pos()
